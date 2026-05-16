@@ -134,7 +134,10 @@ jobs:
           echo "pushed=true" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch build-package workflow
-        if: steps.check.outputs.proceed == 'true' && steps.commit.outputs.pushed == 'true'
+        # Fire whenever apply produced a dispatch entry, even if there
+        # was nothing to push (re-submitting an unchanged folder should
+        # still re-trigger the build).
+        if: steps.check.outputs.proceed == 'true'
         id: dispatch
         env:
           GH_TOKEN: ${{ secrets.MIP_SYNC_TOKEN }}
@@ -191,15 +194,18 @@ jobs:
           fi
           if [ "$PUSHED" = "true" ]; then
             body+=$'\nChanges pushed to `main`.\n'
-            if [ -n "$DISPATCHED" ]; then
-              body+=$'\n**Build dispatched:**\n'"$DISPATCHED"$'\n'
-            fi
           elif [ "$HAS_CHANGES" = "true" ] && [ "$COMMIT_RESULT" != "success" ]; then
             body+=$'\nFailed to commit/push changes — see the workflow run.\n'
           elif [ "$APPLY_RESULT" != "success" ]; then
             body+=$'\nWorkflow failed before changes could be applied — see the workflow run.\n'
+          elif [ -n "$DISPATCHED" ]; then
+            body+=$'\nNo file changes to push; re-dispatching the build.\n'
           else
             body+=$'\nNo changes were applied.\n'
+          fi
+
+          if [ -n "$DISPATCHED" ]; then
+            body+=$'\n**Build dispatched:**\n'"$DISPATCHED"$'\n'
           fi
 
           gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$body"
