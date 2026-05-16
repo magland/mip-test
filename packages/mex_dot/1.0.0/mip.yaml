@@ -1,0 +1,13 @@
+name: mex_dot
+description: "MEX dot-product example exercising compile + test on each arch"
+version: "1.0.0"
+license: MIT
+dependencies: []
+
+paths:
+  - path: "."
+
+builds:
+  - architectures: [linux_x86_64, macos_arm64, windows_x86_64]
+    compile_script: compile.m
+    test_script: run_test.m

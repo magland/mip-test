@@ -1,0 +1,12 @@
+name: with_test
+description: "Pure-MATLAB test package for the mip-test channel"
+version: "1.0.0"
+license: MIT
+dependencies: []
+
+paths:
+  - path: "."
+
+builds:
+  - architectures: [any]
+    test_script: "run_test.m"

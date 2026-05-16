@@ -1,0 +1,247 @@
+name: Build Package
+
+# Per-package, per-architecture build pipeline.
+#
+# A single run handles ONE (package_path, architecture) pair, with three jobs:
+#   1. build              - prepare + bundle the package -> .mhl artifact
+#   2. test-and-upload    - install/load/test the .mhl on its native arch,
+#                            then upload to GitHub Releases on success
+#   3. assemble-and-deploy - rebuild the channel index from all releases
+#                            and deploy to GitHub Pages
+#
+# Dispatch directly (workflow_dispatch) or call from another workflow
+# (workflow_call).
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_path:
+        description: 'Release dir, e.g. packages/with_test/1.0.0'
+        required: true
+        type: string
+      architecture:
+        description: 'Target architecture'
+        required: true
+        type: choice
+        options:
+          - any
+          - linux_x86_64
+          - macos_arm64
+          - windows_x86_64
+      force:
+        description: 'Rebuild even if already published'
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      package_path:
+        required: true
+        type: string
+      architecture:
+        required: true
+        type: string
+      force:
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: build (${{ inputs.architecture }})
+    runs-on: ${{ fromJSON('{"any":"ubuntu-latest","linux_x86_64":"ubuntu-latest","macos_arm64":"macos-latest","windows_x86_64":"windows-latest"}')[inputs.architecture] }}
+    outputs:
+      has_bundle: ${{ steps.bundle_check.outputs.has_bundle }}
+      mhl_name: ${{ steps.bundle_check.outputs.mhl_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout mip
+        uses: actions/checkout@v4
+        with:
+          repository: mip-org/mip
+          path: mip
+
+      - name: Set up MIP_ROOT
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.mip/packages"
+          echo "MIP_ROOT=$HOME/.mip" >> "$GITHUB_ENV"
+
+      - name: Linux toolchain (gcc-10)
+        if: inputs.architecture == 'linux_x86_64'
+        shell: bash
+        run: |
+          sudo apt update
+          sudo apt install -y gcc-10 g++-10 patchelf
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 \
+            --slave /usr/bin/g++ g++ /usr/bin/g++-10
+          sudo update-alternatives --set gcc /usr/bin/gcc-10
+          echo "CC=gcc-10" >> "$GITHUB_ENV"
+          echo "CXX=g++-10" >> "$GITHUB_ENV"
+          gcc --version
+
+      - name: macOS gfortran alias
+        if: inputs.architecture == 'macos_arm64'
+        run: |
+          gfortran-15 --version
+          ln -sf /opt/homebrew/bin/gfortran-15 /opt/homebrew/bin/gfortran
+          gfortran --version
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install requests pyyaml
+
+      - name: Prepare package
+        env:
+          BUILD_ARCHITECTURE: ${{ inputs.architecture }}
+        shell: bash
+        run: |
+          python scripts/prepare_one.py \
+            --package-path "${{ inputs.package_path }}" \
+            --architecture "${{ inputs.architecture }}" \
+            ${{ inputs.force && '--force' || '' }}
+
+      - name: Check for prepared package
+        id: prepared_check
+        shell: bash
+        run: |
+          if [ -d build/prepared ] && [ -n "$(ls -A build/prepared 2>/dev/null)" ]; then
+            echo "has_prepared=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_prepared=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to bundle (arch mismatch or already published)."
+          fi
+
+      - name: Set up MATLAB
+        if: steps.prepared_check.outputs.has_prepared == 'true'
+        uses: matlab-actions/setup-matlab@v2
+        with:
+          cache: true
+          release: R2022a
+
+      - name: Bundle package
+        if: steps.prepared_check.outputs.has_prepared == 'true'
+        uses: matlab-actions/run-command@v2
+        env:
+          BUILD_ARCHITECTURE: ${{ inputs.architecture }}
+        with:
+          command: "addpath('mip'); addpath('scripts'); bundle_one"
+
+      - name: Bundle check
+        id: bundle_check
+        shell: bash
+        run: |
+          if ls build/bundled/*.mhl >/dev/null 2>&1; then
+            mhl=$(ls build/bundled/*.mhl | head -n1)
+            echo "has_bundle=true" >> "$GITHUB_OUTPUT"
+            echo "mhl_name=$(basename "$mhl")" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_bundle=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload bundled artifact
+        if: steps.bundle_check.outputs.has_bundle == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundled-${{ inputs.architecture }}
+          path: build/bundled/
+          if-no-files-found: error
+
+  test-and-upload:
+    name: test+upload (${{ inputs.architecture }})
+    needs: build
+    if: needs.build.outputs.has_bundle == 'true'
+    runs-on: ${{ fromJSON('{"any":"ubuntu-latest","linux_x86_64":"ubuntu-latest","macos_arm64":"macos-latest","windows_x86_64":"windows-latest"}')[inputs.architecture] }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout mip
+        uses: actions/checkout@v4
+        with:
+          repository: mip-org/mip
+          path: mip
+
+      - name: Set up MIP_ROOT
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.mip/packages"
+          echo "MIP_ROOT=$HOME/.mip" >> "$GITHUB_ENV"
+
+      - name: Download bundled artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bundled-${{ inputs.architecture }}
+          path: build/bundled
+
+      - name: Set up MATLAB
+        uses: matlab-actions/setup-matlab@v2
+        with:
+          cache: true
+          release: R2022a
+
+      - name: Test bundled package
+        uses: matlab-actions/run-command@v2
+        with:
+          command: "addpath('mip'); addpath('scripts'); test_one"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install requests pyyaml
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/upload_one.py
+
+  assemble-and-deploy:
+    name: assemble + deploy
+    needs: [build, test-and-upload]
+    if: always() && needs.build.result == 'success' && (needs.test-and-upload.result == 'success' || needs.test-and-upload.result == 'skipped')
+    runs-on: ubuntu-latest
+    # Serialize Pages deploys across concurrent package builds.
+    concurrency:
+      group: "pages"
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install requests pyyaml
+
+      - name: Assemble package index
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/assemble_index.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/gh-pages
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
