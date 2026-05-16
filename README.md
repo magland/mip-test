@@ -27,9 +27,6 @@ site/
   build-package.yml            # Per-package, per-arch pipeline (3 jobs)
   assemble-index.yml           # Manual: reassemble index without building
   add-package.yml              # Issue-driven submission + admin approval
-
-.github/ISSUE_TEMPLATE/
-  add-package.yml              # Issue form for submitters
 ```
 
 ## Build pipeline (`build-package.yml`)
@@ -73,22 +70,36 @@ A dispatcher workflow that auto-detects which `(package, arch)` pairs need rebui
 
 ## Issue-driven submission flow
 
-A submitter opens an issue using the **Add package** template (`.github/ISSUE_TEMPLATE/add-package.yml`), supplying:
+Free-form, modelled on mip-core's add-package flow. To submit, open an issue with:
 
-- a GitHub URL to the source release folder, in the exact form
-  `https://github.com/<owner>/<repo>/tree/<branch>/packages/<name>/<version>`
-- a target architecture (`any` / `linux_x86_64` / `macos_arm64` / `windows_x86_64`)
+- **Title** — either starting with `Add package` (case-insensitive), or the URL itself.
+- **Body** — must contain exactly one conforming package URL and exactly one architecture keyword.
+
+Conforming URL:
+
+```
+https://github.com/<owner>/<repo>/tree/<branch>/packages/<name>/<version>
+```
+
+Architecture keywords: `any`, `linux_x86_64`, `macos_arm64`, `windows_x86_64`.
+
+Example body:
+
+```
+https://github.com/magland/mip-test/tree/main/packages/with_test/1.0.0
+any
+```
 
 One package release + one architecture per issue.
 
 On open, `add-package.yml` runs `scripts/add_package_from_issue.py validate`, posts a comment summarising what was parsed (and whether the destination already exists), and rewrites the title to `Add package: \`packages/<name>/<version>\` (<arch>)`.
 
-To approve, any user with write access on the repo replies with `approve` on its own line. The workflow then:
+To approve, any user with write access on the repo (`author_association` in `OWNER`/`MEMBER`/`COLLABORATOR`) replies with `approve` on its own line. The workflow then:
 
 1. Clones the source repo at the specified branch and copies the folder into `packages/`.
-2. Commits and pushes to `main` using `secrets.MIP_SYNC_TOKEN`.
-3. Dispatches `build-package.yml` with the parsed `(package_path, architecture)`.
-4. Reports the result back as a comment, including a link to the dispatched build.
+2. Commits and pushes to `main` using `secrets.MIP_SYNC_TOKEN` (no-op push if folder is identical).
+3. Dispatches `build-package.yml` with the parsed `(package_path, architecture)`. Fires even on no-op push, so re-approving an existing folder re-triggers the build.
+4. Reports back to the issue with the added/replaced file, push status, and dispatched build.
 
 **Secrets required:** `MIP_SYNC_TOKEN` (PAT with `contents:write` + `workflow` scopes on this repo).
 

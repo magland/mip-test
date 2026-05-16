@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """Validate or apply a single package addition described in a GitHub issue.
 
-The issue is expected to come from .github/ISSUE_TEMPLATE/add-package.yml,
-whose form produces a body shaped like:
+Free-form: the issue body just needs to contain
 
-    ### Package URL
+  1. a single conforming URL of the shape
+     `https://github.com/<owner>/<repo>/tree/<branch>/packages/<name>/<version>`
+  2. exactly one of the architecture keywords:
+     `any`, `linux_x86_64`, `macos_arm64`, `windows_x86_64`
 
-    https://github.com/<owner>/<repo>/tree/<branch>/packages/<name>/<version>
-
-    ### Architecture
-
-    linux_x86_64
-
-This script extracts the URL and architecture from the body (read via
-$ISSUE_BODY).
+Either the URL or the architecture may appear in the title; if the title
+is itself a conforming URL it is folded into the body. One package
+release + one architecture per issue.
 
 Subcommands:
 
@@ -23,8 +20,8 @@ Subcommands:
     apply --report-file PATH --errors-file PATH --dispatch-file PATH \
             [--repo-root DIR]
         Clone the source repo, copy packages/<name>/<version> into
-        --repo-root, and write `<package_path>\t<architecture>` to
-        --dispatch-file on success so the workflow can dispatch a build.
+        --repo-root, and write `<package_path>\\t<architecture>` to
+        --dispatch-file so the workflow can dispatch the build.
 """
 
 import argparse
@@ -41,9 +38,13 @@ URL_RE = re.compile(
     r"https://github\.com/[^/\s]+/[^/\s]+/tree/[^/\s]+/[^\s)]+"
 )
 
-VALID_ARCHITECTURES = {
+VALID_ARCHITECTURES = (
     "any", "linux_x86_64", "macos_arm64", "windows_x86_64",
-}
+)
+
+ARCH_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(a) for a in VALID_ARCHITECTURES) + r")\b"
+)
 
 URL_FORMAT_HINT = (
     "    https://github.com/<owner>/<repo>/tree/<branch>"
@@ -66,81 +67,78 @@ def _parse_url(url):
     return owner, repo, branch, path
 
 
-def _extract_section(body, heading):
-    """Pull the text under a `### <heading>` block from an issue-form body.
-
-    Form bodies use the literal pattern '### <Label>' followed by a blank
-    line and then the value. Returns the stripped value, or '' if absent.
-    """
-    pattern = re.compile(
-        rf"^###\s+{re.escape(heading)}\s*\n+(.*?)(?=\n###\s|\Z)",
-        re.MULTILINE | re.DOTALL,
-    )
-    m = pattern.search(body)
-    if not m:
-        return ""
-    return m.group(1).strip()
+def get_effective_body():
+    """Return ISSUE_BODY with ISSUE_TITLE prepended if the title alone is a
+    conforming URL (lets users put the URL in the title)."""
+    body = os.environ.get("ISSUE_BODY", "")
+    title = os.environ.get("ISSUE_TITLE", "").strip()
+    if URL_RE.fullmatch(title):
+        body = title + "\n\n" + body
+    return body
 
 
 def parse_issue(body):
     """Return (entry_or_None, errors).
 
-    entry on success: dict with keys url, owner, repo, branch, path,
+    On success, entry has keys: url, owner, repo, branch, path,
     name, version, architecture, package_path.
     """
     body = body.replace("\r", "")
-    url_section = _extract_section(body, "Package URL")
-    arch_section = _extract_section(body, "Architecture")
 
-    errors = []
-
-    url = None
-    if url_section:
-        m = URL_RE.search(url_section)
-        if m:
-            url = m.group(0).rstrip("/").rstrip(")")
-    if not url:
-        # Fall back to any URL anywhere in the body (handles users editing
-        # the body free-form after submission).
-        m = URL_RE.search(body)
-        if m:
-            url = m.group(0).rstrip("/").rstrip(")")
-
-    parsed_url = _parse_url(url) if url else None
-    if not parsed_url:
-        errors.append(
-            "- Could not find a conforming package URL. Expected:\n\n"
-            f"{URL_FORMAT_HINT}"
-        )
-        owner = repo = branch = path = name = version = None
-    else:
-        owner, repo, branch, path = parsed_url
+    # 1. URL: find unique conforming URLs.
+    urls = []
+    seen = set()
+    for u in URL_RE.findall(body):
+        u = u.rstrip("/").rstrip(")")
+        if u in seen:
+            continue
+        seen.add(u)
+        parsed = _parse_url(u)
+        if not parsed:
+            continue
+        owner, repo, branch, path = parsed
         parts = path.split("/")
         if len(parts) != 3 or parts[0] != "packages" or ".." in parts:
-            errors.append(
-                f"- URL path `{path}` must be exactly "
-                "`packages/<name>/<version>`."
-            )
-            name = version = None
-        else:
-            name, version = parts[1], parts[2]
-            if not name or not version:
-                errors.append(
-                    "- URL path is missing package name or version."
-                )
+            continue
+        name, version = parts[1], parts[2]
+        if not name or not version:
+            continue
+        urls.append((u, owner, repo, branch, path, name, version))
 
-    architecture = arch_section.strip().split()[0] if arch_section else ""
-    if not architecture:
-        errors.append("- No architecture specified.")
-    elif architecture not in VALID_ARCHITECTURES:
+    errors = []
+    if not urls:
         errors.append(
-            f"- Architecture `{architecture}` is not one of "
-            f"{sorted(VALID_ARCHITECTURES)}."
+            "- No conforming package URL found. Expected one of the form:\n\n"
+            f"{URL_FORMAT_HINT}"
+        )
+    elif len(urls) > 1:
+        joined = ", ".join(f"`{u[0]}`" for u in urls)
+        errors.append(
+            f"- Multiple URLs detected ({joined}); submit one package "
+            "release per issue."
+        )
+
+    # 2. Architecture: search outside the URLs (URLs may legitimately
+    #    contain 'any' as a version name).
+    body_no_urls = URL_RE.sub("", body)
+    arch_hits = list(dict.fromkeys(ARCH_RE.findall(body_no_urls)))
+    if not arch_hits:
+        errors.append(
+            "- No architecture specified. Include exactly one of: "
+            + ", ".join(f"`{a}`" for a in VALID_ARCHITECTURES) + "."
+        )
+    elif len(arch_hits) > 1:
+        joined = ", ".join(f"`{a}`" for a in arch_hits)
+        errors.append(
+            f"- Multiple architectures detected ({joined}); include "
+            "exactly one."
         )
 
     if errors:
         return None, errors
 
+    url, owner, repo, branch, path, name, version = urls[0]
+    architecture = arch_hits[0]
     return {
         "url": url,
         "owner": owner,
@@ -156,11 +154,13 @@ def parse_issue(body):
 
 def render_validation_comment(entry, errors, repo_root):
     if errors or not entry:
-        lines = ["The issue is not formatted correctly."]
+        lines = ["The issue body is not formatted correctly."]
         lines += ["", "Errors:"] + errors
         lines += [
             "",
-            "Please open a new issue using the *Add package* template.",
+            "Please close this issue and open a new one whose body "
+            "contains a conforming package URL **and** an architecture "
+            "keyword.",
         ]
         return "\n".join(lines) + "\n"
 
@@ -170,7 +170,6 @@ def render_validation_comment(entry, errors, repo_root):
     ).is_dir()
     repo_id = f"{entry['owner']}/{entry['repo']}"
     repo_url = f"https://github.com/{entry['owner']}/{entry['repo']}"
-
     marker = (
         " **(already exists — will be replaced)**" if dest_exists else ""
     )
@@ -184,8 +183,8 @@ def render_validation_comment(entry, errors, repo_root):
         "",
         "An admin (anyone with write access on this repo) can approve "
         "this request by replying with `approve` on its own line. On "
-        "approval, the source folder will be copied into `packages/` "
-        "and the per-package build workflow will be dispatched for "
+        "approval, the source folder will be copied into `packages/`, "
+        "any change committed, and the per-package build dispatched for "
         f"architecture `{entry['architecture']}`.",
     ]
     if dest_exists:
@@ -253,7 +252,7 @@ def apply_entry(entry, repo_root):
 
 
 def cmd_validate(args):
-    body = os.environ.get("ISSUE_BODY", "")
+    body = get_effective_body()
     repo_root = Path(args.repo_root).resolve()
     entry, errors = parse_issue(body)
     Path(args.output_file).write_text(
@@ -266,7 +265,7 @@ def cmd_validate(args):
 
 
 def cmd_apply(args):
-    body = os.environ.get("ISSUE_BODY", "")
+    body = get_effective_body()
     repo_root = Path(args.repo_root).resolve()
     entry, parse_errors = parse_issue(body)
 
