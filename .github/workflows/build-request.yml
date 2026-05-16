@@ -1,0 +1,189 @@
+name: Build request
+
+# Issue-driven build trigger.
+#
+# Submitters open an issue identifying a (package_path, architecture)
+# pair already present in this channel. On admin approval, the workflow
+# dispatches `build-package.yml` for that pair. Nothing in the repo is
+# modified — there is no clone, copy, commit, or push.
+#
+# Issue format (free-form):
+#   - title starts with `build` (case-insensitive), or anything
+#   - body (or title) contains:
+#       * a path `packages/<name>/<version>` (bare or inside a URL)
+#       * exactly one architecture keyword from
+#         {any, linux_x86_64, macos_arm64, windows_x86_64}
+#
+# Approval: a comment containing `approve` on its own line, from a
+# user with write+ on the repo (OWNER/MEMBER/COLLABORATOR).
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  initial-response:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Verify issue title
+        id: check
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          title_lower=$(printf '%s' "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]')
+          if printf '%s' "$title_lower" | grep -qE '^build($|[^a-z])'; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Title does not start with 'build' — skipping."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository
+        if: steps.check.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Build validation comment
+        if: steps.check.outputs.proceed == 'true'
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          mkdir -p .ci-tmp
+          python3 scripts/build_request_from_issue.py validate \
+            --output-file .ci-tmp/comment.md \
+            --title-file .ci-tmp/title.txt \
+            --repo-root .
+
+      - name: Post validation comment
+        if: steps.check.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+            --body-file .ci-tmp/comment.md
+
+      - name: Rewrite title to canonical form
+        if: steps.check.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          CURRENT_TITLE: ${{ github.event.issue.title }}
+        run: |
+          if [ ! -s .ci-tmp/title.txt ]; then
+            echo "No canonical title — leaving title alone."
+            exit 0
+          fi
+          new_title=$(head -n1 .ci-tmp/title.txt)
+          if [ "$CURRENT_TITLE" = "$new_title" ]; then
+            echo "Title already canonical."
+            exit 0
+          fi
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+            --title "$new_title"
+
+  dispatch-on-approval:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request == null &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      actions: write
+      contents: read
+    steps:
+      - name: Verify trigger conditions
+        id: check
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          # Title gate: only act on issues that look like build requests.
+          title_lower=$(printf '%s' "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]')
+          if ! printf '%s' "$title_lower" | grep -qE '^build($|[^a-z])'; then
+            echo "Title does not start with 'build' — skipping."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! printf '%s\n' "$COMMENT_BODY" | tr -d '\r' \
+              | grep -iqE '^[[:space:]]*approve[[:space:]]*$'; then
+            echo "Comment does not contain 'approve' on its own line — skipping."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        if: steps.check.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Resolve build request
+        if: steps.check.outputs.proceed == 'true'
+        id: resolve
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          mkdir -p .ci-tmp
+          if ! python3 scripts/build_request_from_issue.py apply \
+              --dispatch-file .ci-tmp/dispatch.tsv \
+              --errors-file .ci-tmp/errors.md \
+              --repo-root .; then
+            echo "Apply step failed (parse/validation errors)."
+            echo "resolved=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -s .ci-tmp/dispatch.tsv ]; then
+            read -r pkg_path arch < .ci-tmp/dispatch.tsv
+            echo "package_path=$pkg_path" >> "$GITHUB_OUTPUT"
+            echo "architecture=$arch" >> "$GITHUB_OUTPUT"
+            echo "resolved=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "resolved=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch build-package workflow
+        if: steps.check.outputs.proceed == 'true' && steps.resolve.outputs.resolved == 'true'
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PKG_PATH: ${{ steps.resolve.outputs.package_path }}
+          ARCH: ${{ steps.resolve.outputs.architecture }}
+        run: |
+          gh workflow run build-package.yml --repo "$REPO" \
+            -f package_path="$PKG_PATH" \
+            -f architecture="$ARCH"
+          echo "Dispatched: $PKG_PATH ($ARCH)"
+
+      - name: Report back to issue
+        if: always() && steps.check.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RESOLVED: ${{ steps.resolve.outputs.resolved }}
+          PKG_PATH: ${{ steps.resolve.outputs.package_path }}
+          ARCH: ${{ steps.resolve.outputs.architecture }}
+          DISPATCH_RESULT: ${{ steps.dispatch.outcome }}
+        run: |
+          if [ "$RESOLVED" = "true" ] && [ "$DISPATCH_RESULT" = "success" ]; then
+            body="Build dispatched: \`$PKG_PATH\` (\`$ARCH\`). See the [Actions tab](https://github.com/$REPO/actions/workflows/build-package.yml)."
+          elif [ "$RESOLVED" != "true" ]; then
+            errors=""
+            if [ -f .ci-tmp/errors.md ]; then
+              errors=$(cat .ci-tmp/errors.md)
+            fi
+            body=$'Cannot dispatch — issue did not parse:\n\n'"$errors"
+          else
+            body=$'Dispatch failed — see the workflow run.'
+          fi
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$body"

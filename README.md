@@ -26,7 +26,7 @@ site/
 .github/workflows/
   build-package.yml            # Per-package, per-arch pipeline (3 jobs)
   assemble-index.yml           # Manual: reassemble index without building
-  add-package.yml              # Issue-driven submission + admin approval
+  build-request.yml            # Issue-driven build trigger + admin approval
 ```
 
 ## Build pipeline (`build-package.yml`)
@@ -68,40 +68,31 @@ jobs:
 
 A dispatcher workflow that auto-detects which `(package, arch)` pairs need rebuilding and fans out to `build-package.yml` is planned but not yet implemented.
 
-## Issue-driven submission flow
+## Issue-driven build trigger
 
-Free-form, modelled on mip-core's add-package flow. To submit, open an issue with:
+Issues are used to **request a build** of a package already in this channel — not to add packages. The workflow does not clone, copy, commit, or push anything; on admin approval it just dispatches `build-package.yml`.
 
-- **Title** — either starting with `Add package` (case-insensitive), or the URL itself.
-- **Body** — must contain exactly one conforming package URL and exactly one architecture keyword.
+To submit, open an issue with:
 
-Conforming URL:
-
-```
-https://github.com/<owner>/<repo>/tree/<branch>/packages/<name>/<version>
-```
-
-Architecture keywords: `any`, `linux_x86_64`, `macos_arm64`, `windows_x86_64`.
+- **Title** starting with `Build` (case-insensitive).
+- **Body** (or title) containing:
+  - a package path `packages/<name>/<version>` (bare or inside a URL — only the path is read)
+  - exactly one architecture keyword: `any`, `linux_x86_64`, `macos_arm64`, `windows_x86_64`
 
 Example body:
 
 ```
-https://github.com/magland/mip-test/tree/main/packages/with_test/1.0.0
+packages/with_test/1.0.0
 any
 ```
 
 One package release + one architecture per issue.
 
-On open, `add-package.yml` runs `scripts/add_package_from_issue.py validate`, posts a comment summarising what was parsed (and whether the destination already exists), and rewrites the title to `Add package: \`packages/<name>/<version>\` (<arch>)`.
+On open, `build-request.yml` runs `scripts/build_request_from_issue.py validate`, confirms the named folder exists in the channel, posts a summary comment, and rewrites the title to `Build: \`packages/<name>/<version>\` (<arch>)`.
 
-To approve, any user with write access on the repo (`author_association` in `OWNER`/`MEMBER`/`COLLABORATOR`) replies with `approve` on its own line. The workflow then:
+To approve, any user with write access on the repo (`author_association` in `OWNER`/`MEMBER`/`COLLABORATOR`) replies with `approve` on its own line. The workflow then dispatches `build-package.yml` with the parsed `(package_path, architecture)` and posts a confirmation comment linking to the build run. The repo itself is not modified.
 
-1. Clones the source repo at the specified branch and copies the folder into `packages/`.
-2. Commits and pushes to `main` using `secrets.MIP_SYNC_TOKEN` (no-op push if folder is identical).
-3. Dispatches `build-package.yml` with the parsed `(package_path, architecture)`. Fires even on no-op push, so re-approving an existing folder re-triggers the build.
-4. Reports back to the issue with the added/replaced file, push status, and dispatched build.
-
-**Secrets required:** `MIP_SYNC_TOKEN` (PAT with `contents:write` + `workflow` scopes on this repo).
+**Secrets required:** none beyond the default `GITHUB_TOKEN`. (`GITHUB_TOKEN` can trigger `workflow_dispatch` events, so there is no need for a separate PAT.)
 
 ## Manual reindex
 
