@@ -83,7 +83,7 @@ Each build line should look like:
 packages/<name>/<version> <architecture>
 ```
 
-To dispatch every package in the channel on a single line, replace the path with the literal keyword `all-packages`:
+To dispatch every package in the channel on a single line, replace the path with the literal keyword `all-packages`. **It must be the first token of the line** (after any leading whitespace) — this avoids prose like "the all-packages keyword is great" being mistaken for a directive.
 
 ```
 all-packages <architecture>

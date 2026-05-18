@@ -69,7 +69,7 @@ ARCH_RE = re.compile(
 
 FORCE_RE = re.compile(r"\bforce\b", re.IGNORECASE)
 
-ALL_PACKAGES_RE = re.compile(r"\ball[-_]packages\b", re.IGNORECASE)
+ALL_PACKAGES_RE = re.compile(r"^all[-_]packages\b", re.IGNORECASE)
 
 URL_RE = re.compile(
     r"https://github\.com/[^/\s]+/[^/\s]+/tree/[^/\s]+/[^\s)]+"
@@ -141,11 +141,13 @@ def parse_issue(body, repo_root):
         if not line:
             continue
 
-        if ALL_PACKAGES_RE.search(line):
-            # Strip the keyword first so `all-packages` doesn't bleed into
-            # the arch regex (\b sees the hyphen as a word boundary, so a
-            # naive `\ball\b` would otherwise match inside `all-packages`).
-            line_residual = ALL_PACKAGES_RE.sub(" ", line)
+        if ALL_PACKAGES_RE.match(line):
+            # Anchored at start-of-line because the phrase is too prose-like
+            # to safely match anywhere. Strip it before arch detection so
+            # `all-packages` doesn't bleed into ARCH_RE (the hyphen is a
+            # word boundary, so a naive `\ball\b` would match inside
+            # `all-packages`).
+            line_residual = ALL_PACKAGES_RE.sub("", line, count=1)
             line_archs = list(dict.fromkeys(ARCH_RE.findall(line_residual)))
             force = bool(FORCE_RE.search(line_residual))
 
