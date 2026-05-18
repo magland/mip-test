@@ -217,9 +217,14 @@ def check_existing_package(mhl_filename, source_hash, mip_yaml,
         return False
     if existing.get('version') != release_version:
         return False
+    # Treat None / '' / [] as equivalent ("absent") on both sides — the
+    # mip.json writer normalises missing fields to '' or [], while the
+    # locally-read yaml leaves them as None.
+    def _norm(v):
+        return v if v else None
     for field in ('name', 'description', 'dependencies',
                   'homepage', 'repository', 'license'):
-        if existing.get(field) != mip_yaml.get(field):
+        if _norm(existing.get(field)) != _norm(mip_yaml.get(field)):
             return False
     return True
 
