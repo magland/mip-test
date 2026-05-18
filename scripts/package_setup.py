@@ -10,21 +10,26 @@ The mip.yaml shape this script expects:
     builds:
       - architectures: [linux_x86_64, macos_arm64]
         setup:
-          linux: |
-            sudo apt update
-            sudo apt install -y libfftw3-dev
-          macos: |
-            brew install fftw
-          windows: |
-            choco install -y some-tool
+          linux:
+            - "sudo apt update"
+            - "sudo apt install -y libfftw3-dev"
+          macos:
+            - "brew install fftw"
+          windows:
+            - "choco install -y some-tool"
         compile_script: compile.m
+
+Each OS value is a list of shell commands (or a single string). List
+items are joined with newlines and run as one `bash -eu -o pipefail`
+script, so later items see variables/state from earlier items.
 
 Keys are optional. A missing key is a no-op on that OS. If the package
 declares no `setup:` block (or none for the current OS), this script
 exits 0.
 
-Commands run under `bash -eu -o pipefail`, which is available on all
-GitHub runners (native on linux/macos, git-bash on windows).
+Block scalars (`|`, `>`) are intentionally avoided: mip's MATLAB-side
+YAML parser doesn't support them, and the same mip.yaml is consumed by
+both this Python script and `mip.bundle` in MATLAB.
 """
 
 import argparse
@@ -91,9 +96,23 @@ def main():
 
     setup = build.get('setup') or {}
     os_key = current_os_key()
-    script = setup.get(os_key)
-    if not script or not script.strip():
+    raw = setup.get(os_key)
+    if raw is None:
         print(f'package_setup: no {os_key} setup for {args.architecture}.')
+        return
+
+    if isinstance(raw, list):
+        script = '\n'.join(raw)
+    elif isinstance(raw, str):
+        script = raw
+    else:
+        sys.exit(
+            f'package_setup: `setup.{os_key}` must be a string or a list '
+            f'of strings, got {type(raw).__name__}'
+        )
+
+    if not script.strip():
+        print(f'package_setup: empty {os_key} setup for {args.architecture}.')
         return
 
     print(f'--- Running {os_key} setup for {args.architecture} ---')

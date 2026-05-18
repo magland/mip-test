@@ -20,8 +20,8 @@ builds:
     paths:
       - path: "matlab"
     setup:
-      macos: |
-        brew install fftw
+      macos:
+        - "brew install fftw"
   - architectures: [numbl_wasm]
     compile_script: compile_numbl_wasm.m
     test_script: test_fmm2d.m
@@ -29,12 +29,12 @@ builds:
     compile_script: compile_numbl_native.m
     test_script: test_fmm2d.m
     setup:
-      linux: |
-        sudo apt update
-        sudo apt install -y libfftw3-dev libopenblas-dev
+      linux:
+        - "sudo apt update"
+        - "sudo apt install -y libfftw3-dev libopenblas-dev"
   - architectures: [numbl_macos_x86_64]
     compile_script: compile_numbl_native.m
     test_script: test_fmm2d.m
     setup:
-      macos: |
-        brew install fftw openblas
+      macos:
+        - "brew install fftw openblas"

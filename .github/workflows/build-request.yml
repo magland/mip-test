@@ -2,17 +2,19 @@ name: Build request
 
 # Issue-driven build trigger.
 #
-# Submitters open an issue identifying a (package_path, architecture)
-# pair already present in this channel. On admin approval, the workflow
-# dispatches `build-package.yml` for that pair. Nothing in the repo is
+# Submitters open an issue listing one or more (package_path, architecture)
+# pairs already present in this channel. On admin approval, the workflow
+# dispatches `build-package.yml` once per pair. Nothing in the repo is
 # modified — there is no clone, copy, commit, or push.
 #
-# Issue format (free-form):
-#   - title starts with `build` (case-insensitive), or anything
-#   - body (or title) contains:
+# Issue format (free-form, line-based):
+#   - title starts with `build` (case-insensitive)
+#   - body has one or more lines, each containing:
 #       * a path `packages/<name>/<version>` (bare or inside a URL)
-#       * exactly one architecture keyword from
-#         {any, linux_x86_64, macos_arm64, windows_x86_64}
+#       * one or more architecture keywords from
+#         {any, linux_x86_64, macos_arm64, windows_x86_64, all}
+#         (`all` expands to every arch declared in the package's mip.yaml,
+#          intersected with the four channel-supported arches above)
 #
 # Approval: a comment containing `approve` on its own line, from a
 # user with write+ on the repo (OWNER/MEMBER/COLLABORATOR).
@@ -46,6 +48,16 @@ jobs:
       - name: Checkout repository
         if: steps.check.outputs.proceed == 'true'
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        if: steps.check.outputs.proceed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        if: steps.check.outputs.proceed == 'true'
+        run: pip install pyyaml
 
       - name: Build validation comment
         if: steps.check.outputs.proceed == 'true'
@@ -125,6 +137,16 @@ jobs:
         if: steps.check.outputs.proceed == 'true'
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        if: steps.check.outputs.proceed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        if: steps.check.outputs.proceed == 'true'
+        run: pip install pyyaml
+
       - name: Resolve build request
         if: steps.check.outputs.proceed == 'true'
         id: resolve
@@ -142,27 +164,35 @@ jobs:
             exit 0
           fi
           if [ -s .ci-tmp/dispatch.tsv ]; then
-            read -r pkg_path arch < .ci-tmp/dispatch.tsv
-            echo "package_path=$pkg_path" >> "$GITHUB_OUTPUT"
-            echo "architecture=$arch" >> "$GITHUB_OUTPUT"
+            n=$(wc -l < .ci-tmp/dispatch.tsv)
+            echo "n_dispatches=$n" >> "$GITHUB_OUTPUT"
             echo "resolved=true" >> "$GITHUB_OUTPUT"
           else
             echo "resolved=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Dispatch build-package workflow
+      - name: Dispatch build-package workflows
         if: steps.check.outputs.proceed == 'true' && steps.resolve.outputs.resolved == 'true'
         id: dispatch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PKG_PATH: ${{ steps.resolve.outputs.package_path }}
-          ARCH: ${{ steps.resolve.outputs.architecture }}
         run: |
-          gh workflow run build-package.yml --repo "$REPO" \
-            -f package_path="$PKG_PATH" \
-            -f architecture="$ARCH"
-          echo "Dispatched: $PKG_PATH ($ARCH)"
+          failed=0
+          : > .ci-tmp/dispatched.md
+          while IFS=$'\t' read -r pkg_path arch; do
+            [ -z "$pkg_path" ] && continue
+            echo "Dispatching: $pkg_path ($arch)"
+            if gh workflow run build-package.yml --repo "$REPO" \
+                -f package_path="$pkg_path" \
+                -f architecture="$arch"; then
+              printf -- '- `%s` (`%s`)\n' "$pkg_path" "$arch" >> .ci-tmp/dispatched.md
+            else
+              printf -- '- `%s` (`%s`) — FAILED to dispatch\n' "$pkg_path" "$arch" >> .ci-tmp/dispatched.md
+              failed=1
+            fi
+          done < .ci-tmp/dispatch.tsv
+          exit "$failed"
 
       - name: Report back to issue
         if: always() && steps.check.outputs.proceed == 'true'
@@ -171,12 +201,15 @@ jobs:
           REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           RESOLVED: ${{ steps.resolve.outputs.resolved }}
-          PKG_PATH: ${{ steps.resolve.outputs.package_path }}
-          ARCH: ${{ steps.resolve.outputs.architecture }}
+          N_DISPATCHES: ${{ steps.resolve.outputs.n_dispatches }}
           DISPATCH_RESULT: ${{ steps.dispatch.outcome }}
         run: |
           if [ "$RESOLVED" = "true" ] && [ "$DISPATCH_RESULT" = "success" ]; then
-            body="Build dispatched: \`$PKG_PATH\` (\`$ARCH\`). See the [Actions tab](https://github.com/$REPO/actions/workflows/build-package.yml)."
+            dispatched_list=""
+            if [ -f .ci-tmp/dispatched.md ]; then
+              dispatched_list=$(cat .ci-tmp/dispatched.md)
+            fi
+            body="Dispatched ${N_DISPATCHES} build(s):"$'\n\n'"$dispatched_list"$'\n\n'"See the [Actions tab](https://github.com/${REPO}/actions/workflows/build-package.yml)."
           elif [ "$RESOLVED" != "true" ]; then
             errors=""
             if [ -f .ci-tmp/errors.md ]; then
@@ -184,6 +217,10 @@ jobs:
             fi
             body=$'Cannot dispatch — issue did not parse:\n\n'"$errors"
           else
-            body=$'Dispatch failed — see the workflow run.'
+            partial=""
+            if [ -f .ci-tmp/dispatched.md ]; then
+              partial=$(cat .ci-tmp/dispatched.md)
+            fi
+            body=$'Some dispatches failed:\n\n'"$partial"$'\n\nSee the workflow run for details.'
           fi
           gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$body"

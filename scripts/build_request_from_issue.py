@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
 """Validate or apply a build request described in a GitHub issue.
 
-The issue's job is just to **trigger a build** of a package already
-present in this channel under `packages/<name>/<version>/`. The
-workflow does not clone, copy, or commit anything — it only dispatches
-the per-package build workflow on approval.
+The issue's job is just to **trigger builds** of packages already present
+in this channel under `packages/<name>/<version>/`. The workflow does not
+clone, copy, or commit anything — it only dispatches the per-package build
+workflow on approval.
 
-Free-form input. The body (or title) needs to contain:
+Free-form input. Each non-empty line of the body (or title) may contain:
 
-  1. A package path `packages/<name>/<version>` (the path can appear
-     bare or inside a GitHub URL — only the path portion is used).
-  2. Exactly one architecture keyword:
-     `any`, `linux_x86_64`, `macos_arm64`, `windows_x86_64`.
+  1. A package path `packages/<name>/<version>` (bare or inside a GitHub
+     URL — only the path portion is used).
+  2. One or more architecture keywords:
+     `any`, `linux_x86_64`, `macos_arm64`, `windows_x86_64`, or `all`.
+
+`all` expands to every supported architecture declared in the package's
+`mip.yaml` (intersected with the channel's supported arch list above).
+If the channel has no local `mip.yaml` for the package (e.g. recipe-only
+packages), `all` expands to every supported arch.
+
+A line with a path but no arch is an error. Lines with no path are ignored
+(they may be free-form context). Multiple paths on the same line is an
+error.
 
 Subcommands:
 
     validate --output-file PATH [--title-file PATH] [--repo-root DIR]
-        Render the comment to post on issue-open. Confirms the named
+        Render the comment to post on issue-open. Confirms each named
         package folder exists in this repo.
 
     apply --dispatch-file PATH [--errors-file PATH] [--repo-root DIR]
-        Re-parse the issue and write `<package_path>\\t<architecture>`
-        to --dispatch-file so the workflow can dispatch the build.
+        Re-parse the issue and write one TSV row per dispatch
+        (`<package_path>\\t<architecture>`) to --dispatch-file.
 """
 
 import argparse
@@ -30,17 +39,22 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 
 PACKAGE_PATH_RE = re.compile(
     r"\bpackages/[A-Za-z0-9._+\-]+/[A-Za-z0-9._+\-]+"
 )
 
-VALID_ARCHITECTURES = (
+SUPPORTED_ARCHITECTURES = (
     "any", "linux_x86_64", "macos_arm64", "windows_x86_64",
 )
 
+ALL_KEYWORD = "all"
+VALID_ARCH_KEYWORDS = SUPPORTED_ARCHITECTURES + (ALL_KEYWORD,)
+
 ARCH_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(a) for a in VALID_ARCHITECTURES) + r")\b"
+    r"\b(?:" + "|".join(re.escape(a) for a in VALID_ARCH_KEYWORDS) + r")\b"
 )
 
 URL_RE = re.compile(
@@ -59,114 +73,172 @@ def get_effective_body():
     return body
 
 
+def arches_from_mip_yaml(pkg_dir):
+    """Arches declared in mip.yaml, intersected with SUPPORTED_ARCHITECTURES.
+
+    Returns a list ordered by SUPPORTED_ARCHITECTURES. If mip.yaml is
+    missing in the channel (recipe-only package), returns the full
+    SUPPORTED_ARCHITECTURES list — `all` then dispatches each, and per-arch
+    prepare exits silently for arches the upstream mip.yaml doesn't list.
+    """
+    mip_yaml = pkg_dir / "mip.yaml"
+    if not mip_yaml.is_file():
+        return list(SUPPORTED_ARCHITECTURES)
+    with open(mip_yaml) as f:
+        config = yaml.safe_load(f) or {}
+    declared = set()
+    for build in (config.get("builds") or []):
+        for a in (build.get("architectures") or []):
+            declared.add(a)
+    return [a for a in SUPPORTED_ARCHITECTURES if a in declared]
+
+
 def parse_issue(body, repo_root):
-    """Return (entry_or_None, errors)."""
+    """Return (entries, errors).
+
+    entries: list of dicts with keys {package_path, name, version, architecture}.
+    errors: list of human-readable error strings (markdown bullet bodies).
+    """
     body = body.replace("\r", "")
+    body = URL_RE.sub(" ", body)
 
-    # Find unique package paths (deduped, preserving order).
-    paths = list(dict.fromkeys(PACKAGE_PATH_RE.findall(body)))
-
-    # Strip URLs and package paths so arch detection isn't fooled by
-    # a version that happens to be named e.g. "any".
-    body_for_arch = URL_RE.sub("", body)
-    body_for_arch = PACKAGE_PATH_RE.sub("", body_for_arch)
-    arch_hits = list(dict.fromkeys(ARCH_RE.findall(body_for_arch)))
-
+    entries = []
     errors = []
-    if not paths:
+
+    for line_num, raw_line in enumerate(body.split("\n"), 1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        paths = list(dict.fromkeys(PACKAGE_PATH_RE.findall(line)))
+        if not paths:
+            continue
+
+        if len(paths) > 1:
+            joined = ", ".join(f"`{p}`" for p in paths)
+            errors.append(
+                f"- Line {line_num} has multiple package paths "
+                f"({joined}); put one per line."
+            )
+            continue
+
+        package_path = paths[0]
+        line_for_arch = PACKAGE_PATH_RE.sub(" ", line)
+        line_archs = list(dict.fromkeys(ARCH_RE.findall(line_for_arch)))
+
+        if not line_archs:
+            valid = ", ".join(f"`{a}`" for a in VALID_ARCH_KEYWORDS)
+            errors.append(
+                f"- Line {line_num}: `{package_path}` has no architecture. "
+                f"Add one of: {valid}."
+            )
+            continue
+
+        folder = repo_root / package_path
+        if not folder.is_dir():
+            errors.append(
+                f"- `{package_path}` does not exist in this channel."
+            )
+            continue
+
+        parts = package_path.split("/")
+        name, version = parts[1], parts[2]
+
+        expanded = []
+        for arch in line_archs:
+            if arch == ALL_KEYWORD:
+                pkg_arches = arches_from_mip_yaml(folder)
+                if not pkg_arches:
+                    errors.append(
+                        f"- `{package_path}` declares no supported "
+                        f"architectures; cannot expand `all`."
+                    )
+                    continue
+                expanded.extend(pkg_arches)
+            else:
+                expanded.append(arch)
+
+        for arch in expanded:
+            entries.append({
+                "package_path": package_path,
+                "name": name,
+                "version": version,
+                "architecture": arch,
+            })
+
+    if not entries and not errors:
         errors.append(
-            "- No package path found. Include a path of the form:\n\n"
-            f"{PATH_FORMAT_HINT}"
-        )
-    elif len(paths) > 1:
-        joined = ", ".join(f"`{p}`" for p in paths)
-        errors.append(
-            f"- Multiple package paths detected ({joined}); submit one "
-            "build request per issue."
+            "- No package path found. Include at least one line of the form:"
+            f"\n\n{PATH_FORMAT_HINT} <architecture>"
         )
 
-    if not arch_hits:
-        errors.append(
-            "- No architecture specified. Include exactly one of: "
-            + ", ".join(f"`{a}`" for a in VALID_ARCHITECTURES) + "."
-        )
-    elif len(arch_hits) > 1:
-        joined = ", ".join(f"`{a}`" for a in arch_hits)
-        errors.append(
-            f"- Multiple architectures detected ({joined}); include "
-            "exactly one."
-        )
+    seen = set()
+    deduped = []
+    for e in entries:
+        key = (e["package_path"], e["architecture"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(e)
 
-    if errors:
-        return None, errors
-
-    package_path = paths[0]
-    architecture = arch_hits[0]
-    parts = package_path.split("/")
-    name, version = parts[1], parts[2]
-
-    folder = repo_root / package_path
-    exists = folder.is_dir()
-    if not exists:
-        errors.append(
-            f"- `{package_path}` does not exist in this channel."
-        )
-        return None, errors
-
-    return {
-        "package_path": package_path,
-        "name": name,
-        "version": version,
-        "architecture": architecture,
-    }, []
+    return deduped, errors
 
 
-def render_validation_comment(entry, errors):
-    if errors or not entry:
+def render_validation_comment(entries, errors):
+    if errors or not entries:
         lines = ["The issue is not formatted correctly."]
         lines += ["", "Errors:"] + errors
         lines += [
             "",
-            "Edit the issue body or open a new one with a package path "
-            "and an architecture keyword.",
+            "Edit the issue body or open a new one. Each build line "
+            "should look like:",
+            "",
+            "    packages/<name>/<version> <arch>",
+            "",
+            "Valid architectures: "
+            + ", ".join(f"`{a}`" for a in VALID_ARCH_KEYWORDS) + ".",
         ]
         return "\n".join(lines) + "\n"
 
-    pkg_label = (
-        f"{entry['name']}@{entry['version']} ({entry['architecture']})"
-    )
-    lines = [
-        f"Detected build request: `{pkg_label}`",
-        "",
-        f"- Package: `{entry['package_path']}`",
-        f"- Architecture: `{entry['architecture']}`",
+    n = len(entries)
+    if n == 1:
+        e = entries[0]
+        header = f"Detected build request: `{e['name']}@{e['version']} ({e['architecture']})`"
+    else:
+        header = f"Detected {n} build dispatches:"
+    lines = [header, ""]
+    for e in entries:
+        lines.append(
+            f"- `{e['package_path']}` ({e['architecture']})"
+        )
+    lines += [
         "",
         "An admin (anyone with write access on this repo) can approve "
         "this request by replying with `approve` on its own line. On "
-        "approval, `build-package.yml` will be dispatched for this "
-        "(package, architecture) pair — no files are copied or "
-        "modified.",
+        "approval, `build-package.yml` will be dispatched once per "
+        "(package, architecture) pair listed above — no files in this "
+        "repo are copied or modified.",
     ]
     return "\n".join(lines) + "\n"
 
 
-def canonical_title(entry):
-    if not entry:
+def canonical_title(entries):
+    """Canonical title rewrite — only for single-entry requests."""
+    if len(entries) != 1:
         return None
-    return (
-        f"Build: `{entry['package_path']}` ({entry['architecture']})"
-    )
+    e = entries[0]
+    return f"Build: `{e['package_path']}` ({e['architecture']})"
 
 
 def cmd_validate(args):
     body = get_effective_body()
     repo_root = Path(args.repo_root).resolve()
-    entry, errors = parse_issue(body, repo_root)
+    entries, errors = parse_issue(body, repo_root)
     Path(args.output_file).write_text(
-        render_validation_comment(entry, errors)
+        render_validation_comment(entries, errors)
     )
     if args.title_file:
-        title = canonical_title(entry) or ""
+        title = canonical_title(entries) or ""
         Path(args.title_file).write_text(title + ("\n" if title else ""))
     return 0
 
@@ -174,19 +246,22 @@ def cmd_validate(args):
 def cmd_apply(args):
     body = get_effective_body()
     repo_root = Path(args.repo_root).resolve()
-    entry, errors = parse_issue(body, repo_root)
-    if entry is None:
+    entries, errors = parse_issue(body, repo_root)
+    if not entries:
         Path(args.dispatch_file).write_text("")
         if args.errors_file:
             Path(args.errors_file).write_text(
                 "\n".join(errors) + ("\n" if errors else "")
             )
         return 1
-    Path(args.dispatch_file).write_text(
-        f"{entry['package_path']}\t{entry['architecture']}\n"
-    )
+    rows = [
+        f"{e['package_path']}\t{e['architecture']}\n" for e in entries
+    ]
+    Path(args.dispatch_file).write_text("".join(rows))
     if args.errors_file:
-        Path(args.errors_file).write_text("")
+        Path(args.errors_file).write_text(
+            "\n".join(errors) + ("\n" if errors else "")
+        )
     return 0
 
 

@@ -68,31 +68,72 @@ jobs:
 
 A dispatcher workflow that auto-detects which `(package, arch)` pairs need rebuilding and fans out to `build-package.yml` is planned but not yet implemented.
 
-## Issue-driven build trigger
+## Submitting a build via issue
 
-Issues are used to **request a build** of a package already in this channel — not to add packages. The workflow does not clone, copy, commit, or push anything; on admin approval it just dispatches `build-package.yml`.
+Issues are used to **request builds** of packages already in this channel — not to add new packages. The workflow does not clone, copy, commit, or push anything; on admin approval it dispatches one `build-package.yml` run per `(package, architecture)` pair listed in the issue.
 
-To submit, open an issue with:
+### Step 1 — Open an issue
 
-- **Title** starting with `Build` (case-insensitive).
-- **Body** (or title) containing:
-  - a package path `packages/<name>/<version>` (bare or inside a URL — only the path is read)
-  - exactly one architecture keyword: `any`, `linux_x86_64`, `macos_arm64`, `windows_x86_64`
+- **Title** must start with `Build` (case-insensitive).
+- **Body** lists one or more build lines, free-form. Each non-empty line that contains a package path is parsed; lines without a path are ignored as free-form context.
 
-Example body:
+Each build line should look like:
 
 ```
-packages/with_test/1.0.0
-any
+packages/<name>/<version> <architecture>
 ```
 
-One package release + one architecture per issue.
+### Architecture keywords
 
-On open, `build-request.yml` runs `scripts/build_request_from_issue.py validate`, confirms the named folder exists in the channel, posts a summary comment, and rewrites the title to `Build: \`packages/<name>/<version>\` (<arch>)`.
+| Keyword | Runner |
+| --- | --- |
+| `any` | ubuntu-latest (arch-independent / pure MATLAB) |
+| `linux_x86_64` | ubuntu-latest |
+| `macos_arm64` | macos-latest (Apple Silicon) |
+| `windows_x86_64` | windows-latest |
+| `all` | expands to every supported architecture declared in the package's `mip.yaml` |
 
-To approve, any user with write access on the repo (`author_association` in `OWNER`/`MEMBER`/`COLLABORATOR`) replies with `approve` on its own line. The workflow then dispatches `build-package.yml` with the parsed `(package_path, architecture)` and posts a confirmation comment linking to the build run. The repo itself is not modified.
+Multiple keywords on one line dispatch multiple builds for that package.
 
-**Secrets required:** none beyond the default `GITHUB_TOKEN`. (`GITHUB_TOKEN` can trigger `workflow_dispatch` events, so there is no need for a separate PAT.)
+### Examples
+
+**One package, one arch:**
+
+```
+packages/with_test/1.0.0 any
+```
+
+**One package, all architectures it supports:**
+
+```
+packages/fmm2d/main all
+```
+
+**Multiple packages in a single issue:**
+
+```
+packages/chebfun/5.7.0 any
+packages/fmm2d/main all
+packages/mex_dot/1.0.0 linux_x86_64 macos_arm64
+```
+
+**Inside a sentence works too:**
+
+```
+Please build packages/with_test/1.0.0 on any.
+```
+
+### Step 2 — Workflow validates
+
+On open, `build-request.yml` parses the issue and replies with the list of `(package, architecture)` pairs it detected. If parsing fails (no path, no arch, path doesn't exist in the channel, etc.) the comment lists the errors and nothing is dispatched.
+
+For single-build requests, the issue title is rewritten to a canonical form. Multi-build requests keep their original title.
+
+### Step 3 — Admin approval
+
+A user with write access on the repo (`author_association` in `OWNER`/`MEMBER`/`COLLABORATOR`) approves by replying with `approve` on its own line. The workflow then dispatches `build-package.yml` once per pair and posts a final comment with the dispatched list.
+
+**Secrets required:** none beyond the default `GITHUB_TOKEN`.
 
 ## Manual reindex
 
