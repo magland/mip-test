@@ -9,7 +9,8 @@ workflow on approval.
 Free-form input. Each non-empty line of the body (or title) may contain:
 
   1. A package path `packages/<name>/<version>` (bare or inside a GitHub
-     URL — only the path portion is used).
+     URL — only the path portion is used) OR the keyword `all-packages`
+     to mean "every package in this channel".
   2. One or more architecture keywords:
      `any`, `linux_x86_64`, `macos_arm64`, `windows_x86_64`, or `all`.
   3. Optionally, the keyword `force` to rebuild even if a matching .mhl
@@ -21,9 +22,15 @@ Free-form input. Each non-empty line of the body (or title) may contain:
 If the channel has no local `mip.yaml` for the package (e.g. recipe-only
 packages), `all` expands to every supported arch.
 
-A line with a path but no arch is an error. Lines with no path are ignored
-(they may be free-form context). Multiple paths on the same line is an
-error.
+`all-packages <arch>` dispatches every channel package (those with a
+`packages/<name>/<version>/recipe.yaml`) for the given arch. A specific
+arch (e.g. `linux_x86_64`) only emits packages whose mip.yaml declares
+that arch; `all` emits each package's full declared set. Recipe-only
+packages (no channel-side mip.yaml) are treated as supporting every arch.
+
+A line with a path or `all-packages` but no arch is an error. Lines
+with neither are ignored (free-form context). Multiple paths on the
+same line is an error.
 
 Subcommands:
 
@@ -62,6 +69,8 @@ ARCH_RE = re.compile(
 
 FORCE_RE = re.compile(r"\bforce\b", re.IGNORECASE)
 
+ALL_PACKAGES_RE = re.compile(r"\ball[-_]packages\b", re.IGNORECASE)
+
 URL_RE = re.compile(
     r"https://github\.com/[^/\s]+/[^/\s]+/tree/[^/\s]+/[^\s)]+"
 )
@@ -76,6 +85,23 @@ def get_effective_body():
     if title.strip():
         return title + "\n\n" + body
     return body
+
+
+def list_all_packages(repo_root):
+    """Sorted list of every `packages/<name>/<version>` with a recipe.yaml."""
+    pkgs = []
+    pkgs_dir = repo_root / 'packages'
+    if not pkgs_dir.is_dir():
+        return pkgs
+    for name_dir in sorted(pkgs_dir.iterdir()):
+        if not name_dir.is_dir() or name_dir.name.startswith('.'):
+            continue
+        for ver_dir in sorted(name_dir.iterdir()):
+            if not ver_dir.is_dir() or ver_dir.name.startswith('.'):
+                continue
+            if (ver_dir / 'recipe.yaml').is_file():
+                pkgs.append(f"packages/{name_dir.name}/{ver_dir.name}")
+    return pkgs
 
 
 def arches_from_mip_yaml(pkg_dir):
@@ -113,6 +139,44 @@ def parse_issue(body, repo_root):
     for line_num, raw_line in enumerate(body.split("\n"), 1):
         line = raw_line.strip()
         if not line:
+            continue
+
+        if ALL_PACKAGES_RE.search(line):
+            # Strip the keyword first so `all-packages` doesn't bleed into
+            # the arch regex (\b sees the hyphen as a word boundary, so a
+            # naive `\ball\b` would otherwise match inside `all-packages`).
+            line_residual = ALL_PACKAGES_RE.sub(" ", line)
+            line_archs = list(dict.fromkeys(ARCH_RE.findall(line_residual)))
+            force = bool(FORCE_RE.search(line_residual))
+
+            if not line_archs:
+                valid = ", ".join(f"`{a}`" for a in VALID_ARCH_KEYWORDS)
+                errors.append(
+                    f"- Line {line_num}: `all-packages` has no architecture. "
+                    f"Add one of: {valid}."
+                )
+                continue
+
+            for pkg_path in list_all_packages(repo_root):
+                pkg_folder = repo_root / pkg_path
+                pkg_arches = arches_from_mip_yaml(pkg_folder)
+                expanded = []
+                for arch in line_archs:
+                    if arch == ALL_KEYWORD:
+                        expanded.extend(pkg_arches)
+                    elif arch in pkg_arches:
+                        expanded.append(arch)
+                    # else: package doesn't declare this arch — skip silently
+                parts = pkg_path.split("/")
+                name, version = parts[1], parts[2]
+                for arch in expanded:
+                    entries.append({
+                        "package_path": pkg_path,
+                        "name": name,
+                        "version": version,
+                        "architecture": arch,
+                        "force": force,
+                    })
             continue
 
         paths = list(dict.fromkeys(PACKAGE_PATH_RE.findall(line)))

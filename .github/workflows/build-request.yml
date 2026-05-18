@@ -10,7 +10,9 @@ name: Build request
 # Issue format (free-form, line-based):
 #   - title starts with `build` (case-insensitive)
 #   - body has one or more lines, each containing:
-#       * a path `packages/<name>/<version>` (bare or inside a URL)
+#       * a path `packages/<name>/<version>` (bare or inside a URL),
+#         or the keyword `all-packages` to mean "every package in the
+#         channel"
 #       * one or more architecture keywords from
 #         {any, linux_x86_64, macos_arm64, windows_x86_64, all}
 #         (`all` expands to every arch declared in the package's mip.yaml,

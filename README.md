@@ -83,6 +83,14 @@ Each build line should look like:
 packages/<name>/<version> <architecture>
 ```
 
+To dispatch every package in the channel on a single line, replace the path with the literal keyword `all-packages`:
+
+```
+all-packages <architecture>
+```
+
+A package is only dispatched for arches its `mip.yaml` declares. With `all-packages all`, each package is dispatched only for the arches it itself supports.
+
 ### Architecture keywords
 
 | Keyword | Runner |
@@ -133,6 +141,18 @@ packages/mex_dot/1.0.0 linux_x86_64 macos_arm64
 
 ```
 packages/fmm2d/main macos_arm64 force
+```
+
+**Every package in the channel on one arch:**
+
+```
+all-packages linux_x86_64
+```
+
+**Every package, every supported arch, forced:**
+
+```
+all-packages all force
 ```
 
 **Inside a sentence works too:**
