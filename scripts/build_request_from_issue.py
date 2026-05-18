@@ -12,6 +12,9 @@ Free-form input. Each non-empty line of the body (or title) may contain:
      URL — only the path portion is used).
   2. One or more architecture keywords:
      `any`, `linux_x86_64`, `macos_arm64`, `windows_x86_64`, or `all`.
+  3. Optionally, the keyword `force` to rebuild even if a matching .mhl
+     is already published with the same source hash. Applies only to
+     dispatches from the same line.
 
 `all` expands to every supported architecture declared in the package's
 `mip.yaml` (intersected with the channel's supported arch list above).
@@ -56,6 +59,8 @@ VALID_ARCH_KEYWORDS = SUPPORTED_ARCHITECTURES + (ALL_KEYWORD,)
 ARCH_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(a) for a in VALID_ARCH_KEYWORDS) + r")\b"
 )
+
+FORCE_RE = re.compile(r"\bforce\b", re.IGNORECASE)
 
 URL_RE = re.compile(
     r"https://github\.com/[^/\s]+/[^/\s]+/tree/[^/\s]+/[^\s)]+"
@@ -123,8 +128,9 @@ def parse_issue(body, repo_root):
             continue
 
         package_path = paths[0]
-        line_for_arch = PACKAGE_PATH_RE.sub(" ", line)
-        line_archs = list(dict.fromkeys(ARCH_RE.findall(line_for_arch)))
+        line_for_keywords = PACKAGE_PATH_RE.sub(" ", line)
+        line_archs = list(dict.fromkeys(ARCH_RE.findall(line_for_keywords)))
+        force = bool(FORCE_RE.search(line_for_keywords))
 
         if not line_archs:
             valid = ", ".join(f"`{a}`" for a in VALID_ARCH_KEYWORDS)
@@ -164,6 +170,7 @@ def parse_issue(body, repo_root):
                 "name": name,
                 "version": version,
                 "architecture": arch,
+                "force": force,
             })
 
     if not entries and not errors:
@@ -172,14 +179,18 @@ def parse_issue(body, repo_root):
             f"\n\n{PATH_FORMAT_HINT} <architecture>"
         )
 
-    seen = set()
-    deduped = []
+    # Dedupe by (path, arch); if any duplicate set force=true, the merged
+    # entry is force=true (force is monotonic — easier to opt-in once).
+    merged = {}
+    order = []
     for e in entries:
         key = (e["package_path"], e["architecture"])
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(e)
+        if key in merged:
+            merged[key]["force"] = merged[key]["force"] or e["force"]
+        else:
+            merged[key] = e
+            order.append(key)
+    deduped = [merged[k] for k in order]
 
     return deduped, errors
 
@@ -203,13 +214,18 @@ def render_validation_comment(entries, errors):
     n = len(entries)
     if n == 1:
         e = entries[0]
-        header = f"Detected build request: `{e['name']}@{e['version']} ({e['architecture']})`"
+        suffix = ", force" if e["force"] else ""
+        header = (
+            f"Detected build request: "
+            f"`{e['name']}@{e['version']} ({e['architecture']}{suffix})`"
+        )
     else:
         header = f"Detected {n} build dispatches:"
     lines = [header, ""]
     for e in entries:
+        suffix = ", force" if e["force"] else ""
         lines.append(
-            f"- `{e['package_path']}` ({e['architecture']})"
+            f"- `{e['package_path']}` ({e['architecture']}{suffix})"
         )
     lines += [
         "",
@@ -227,7 +243,8 @@ def canonical_title(entries):
     if len(entries) != 1:
         return None
     e = entries[0]
-    return f"Build: `{e['package_path']}` ({e['architecture']})"
+    suffix = ", force" if e["force"] else ""
+    return f"Build: `{e['package_path']}` ({e['architecture']}{suffix})"
 
 
 def cmd_validate(args):
@@ -255,7 +272,9 @@ def cmd_apply(args):
             )
         return 1
     rows = [
-        f"{e['package_path']}\t{e['architecture']}\n" for e in entries
+        f"{e['package_path']}\t{e['architecture']}\t"
+        f"{'true' if e['force'] else 'false'}\n"
+        for e in entries
     ]
     Path(args.dispatch_file).write_text("".join(rows))
     if args.errors_file:

@@ -95,6 +95,18 @@ packages/<name>/<version> <architecture>
 
 Multiple keywords on one line dispatch multiple builds for that package.
 
+### Skip-if-unchanged (default) and `force`
+
+By default, `prepare_one.py` hashes the package source + channel-side overlay files and compares against the `source_hash` in the `.mip.json` of the latest published `.mhl`. If they match, the build silently no-ops (the `Check for prepared package` step short-circuits the rest of the pipeline). So submitting the same issue twice does not re-publish anything.
+
+Append `force` to a build line to rebuild that pair anyway:
+
+```
+packages/fmm2d/main macos_arm64 force
+```
+
+`force` applies only to dispatches from the same line. Use it once per line you want forced.
+
 ### Examples
 
 **One package, one arch:**
@@ -115,6 +127,12 @@ packages/fmm2d/main all
 packages/chebfun/5.7.0 any
 packages/fmm2d/main all
 packages/mex_dot/1.0.0 linux_x86_64 macos_arm64
+```
+
+**Force rebuild of a single pair:**
+
+```
+packages/fmm2d/main macos_arm64 force
 ```
 
 **Inside a sentence works too:**
