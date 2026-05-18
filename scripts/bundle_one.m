@@ -47,6 +47,9 @@ if ~exist(fullfile(pkgDir, 'mip.yaml'), 'file')
     error('mip:noMipYaml', 'No mip.yaml in %s', pkgDir);
 end
 
+fprintf('Setting up MEX compilers...\n');
+setup_mex_compilers(architecture);
+
 fprintf('Bundling: %s (arch=%s)\n', items(1).name, architecture);
 mip.bundle(pkgDir, '--output', outputDir, '--arch', architecture);
 fprintf('Bundle OK\n');
