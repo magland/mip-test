@@ -4,7 +4,7 @@ version:
 license: "BSD-3-Clause"
 homepage: "https://github.com/fastalgorithms/chunkie"
 repository: "https://github.com/fastalgorithms/chunkie"
-dependencies: ["fmm2d", "flam"]
+dependencies: ["magland/test/fmm2d", "magland/test/flam"]
 
 paths:
   - path: "chunkie"
