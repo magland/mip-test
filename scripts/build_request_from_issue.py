@@ -28,9 +28,9 @@ arch (e.g. `linux_x86_64`) only emits packages whose mip.yaml declares
 that arch; `all` emits each package's full declared set. Recipe-only
 packages (no channel-side mip.yaml) are treated as supporting every arch.
 
-A line with a path or `all-packages` but no arch is an error. Lines
-with neither are ignored (free-form context). Multiple paths on the
-same line is an error.
+A line with a path or `all-packages` but no arch is treated as if `all`
+were specified. Lines with neither are ignored (free-form context).
+Multiple paths on the same line is an error.
 
 Subcommands:
 
@@ -152,12 +152,7 @@ def parse_issue(body, repo_root):
             force = bool(FORCE_RE.search(line_residual))
 
             if not line_archs:
-                valid = ", ".join(f"`{a}`" for a in VALID_ARCH_KEYWORDS)
-                errors.append(
-                    f"- Line {line_num}: `all-packages` has no architecture. "
-                    f"Add one of: {valid}."
-                )
-                continue
+                line_archs = [ALL_KEYWORD]
 
             for pkg_path in list_all_packages(repo_root):
                 pkg_folder = repo_root / pkg_path
@@ -199,12 +194,7 @@ def parse_issue(body, repo_root):
         force = bool(FORCE_RE.search(line_for_keywords))
 
         if not line_archs:
-            valid = ", ".join(f"`{a}`" for a in VALID_ARCH_KEYWORDS)
-            errors.append(
-                f"- Line {line_num}: `{package_path}` has no architecture. "
-                f"Add one of: {valid}."
-            )
-            continue
+            line_archs = [ALL_KEYWORD]
 
         folder = repo_root / package_path
         if not folder.is_dir():

@@ -28,7 +28,7 @@ Open an issue. The title must start with `Build` (case-insensitive). The body li
 packages/<name>/<version> <architecture>
 ```
 
-Multiple architectures on one line dispatch multiple builds for that package. Multiple lines dispatch multiple packages. Lines without a package path are ignored.
+Multiple architectures on one line dispatch multiple builds for that package. Multiple lines dispatch multiple packages. Lines without a package path are ignored. A line that names a package but no architecture is equivalent to `all`.
 
 Example body:
 
