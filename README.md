@@ -1,6 +1,14 @@
 # MIP channel
 
-A MIP package channel. Builds run one (package, architecture) at a time and are triggered by GitHub issues.
+A MIP package channel. Builds run one (package, architecture) at a time. They are triggered automatically when a push to `main` touches a package, or manually via a GitHub issue.
+
+## Auto-build on push
+
+Pushes to `main` run the `push-build.yml` workflow, which diffs the push and dispatches `build-package.yml` once per `(package, architecture)` pair affected by the change.
+
+A file affects `packages/<name>/<version>` iff its path lies inside that directory. Each affected package expands to every arch declared in its `mip.yaml`, intersected with the channel's supported arches (`any`, `linux_x86_64`, `macos_arm64`, `windows_x86_64`). Recipe-only packages (no channel-side `mip.yaml`) expand to all four.
+
+Changes outside `packages/` (scripts, mexopts, workflows, site, README) do not trigger any builds. Deleted packages are skipped. The skip-if-unchanged logic still applies — pushes that don't change a package's source hash short-circuit at the prepare step.
 
 ## Submitting a build
 
