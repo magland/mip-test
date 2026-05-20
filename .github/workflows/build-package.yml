@@ -1,4 +1,5 @@
 name: Build Package
+run-name: "${{ inputs.package_path }} (${{ inputs.architecture }})${{ inputs.force && ' [force]' || '' }}"
 
 # Per-package, per-architecture build pipeline.
 #
