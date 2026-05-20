@@ -1,6 +1,6 @@
 # MIP channel
 
-A MIP package channel. Builds run one (package, architecture) at a time. They are triggered automatically when a push to `main` touches a package, or manually via a GitHub issue.
+A MIP package channel. Builds run one (package, architecture) at a time. They are triggered automatically on push to `main`, daily via a scheduled probe, or manually via a GitHub issue.
 
 ## Auto-build on push
 
@@ -9,6 +9,16 @@ Pushes to `main` run the `push-build.yml` workflow, which diffs the push and dis
 A file affects `packages/<name>/<version>` iff its path lies inside that directory. Each affected package expands to every arch declared in its `mip.yaml`, intersected with the channel's supported arches (`any`, `linux_x86_64`, `macos_arm64`, `windows_x86_64`). Recipe-only packages (no channel-side `mip.yaml`) expand to all four.
 
 Changes outside `packages/` (scripts, mexopts, workflows, site, README) do not trigger any builds. Deleted packages are skipped. The skip-if-unchanged logic still applies — pushes that don't change a package's source hash short-circuit at the prepare step.
+
+## Scheduled rebuild
+
+Daily at 06:00 UTC, `scheduled-build.yml` probes every (package, architecture) pair in the channel by running `prepare_one.py` for each. A pair "needs rebuilding" iff its `.mhl` is missing on GitHub Releases or its source hash no longer matches — typically because an upstream git branch (e.g. `master`, `main`) advanced. Pairs that need rebuilding are dispatched to `build-package.yml`.
+
+The workflow can also be invoked manually:
+
+```bash
+gh workflow run scheduled-build.yml
+```
 
 ## Submitting a build
 
