@@ -72,7 +72,7 @@ packages/foo/1.0.0 linux_x86_64 force
 
 ### Approval
 
-Builds dispatch only when an admin replies with `approve` on its own line. Emoji reactions and `approve` embedded in prose do not count.
+Builds dispatch only when an admin replies with `approve` on its own line. Emoji reactions and `approve` embedded in prose do not count. On a successful dispatch the issue is closed automatically; reopen or open a new one to request more builds.
 
 ### Editing an issue
 

@@ -235,3 +235,15 @@ jobs:
             body=$'Some dispatches failed:\n\n'"$partial"$'\n\nSee the workflow run for details.'
           fi
           gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$body"
+
+      - name: Close issue on successful dispatch
+        if: >-
+          steps.check.outputs.proceed == 'true' &&
+          steps.resolve.outputs.resolved == 'true' &&
+          steps.dispatch.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason completed
