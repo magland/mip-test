@@ -186,16 +186,20 @@ jobs:
           : > .ci-tmp/dispatched.md
           while IFS=$'\t' read -r pkg_path arch force; do
             [ -z "$pkg_path" ] && continue
+            # pkg_path = packages/<name>/<version>
+            name=$(printf '%s' "$pkg_path" | cut -d/ -f2)
+            version=$(printf '%s' "$pkg_path" | cut -d/ -f3)
+            label="${name}@${version}"
             suffix=""
             [ "$force" = "true" ] && suffix=", force"
-            echo "Dispatching: $pkg_path ($arch$suffix)"
+            echo "Dispatching: $label ($arch$suffix)"
             if gh workflow run build-package.yml --repo "$REPO" \
                 -f package_path="$pkg_path" \
                 -f architecture="$arch" \
                 -f force="$force"; then
-              printf -- '- `%s` (`%s`%s)\n' "$pkg_path" "$arch" "$suffix" >> .ci-tmp/dispatched.md
+              printf -- '- `%s` (`%s`%s)\n' "$label" "$arch" "$suffix" >> .ci-tmp/dispatched.md
             else
-              printf -- '- `%s` (`%s`%s) — FAILED to dispatch\n' "$pkg_path" "$arch" "$suffix" >> .ci-tmp/dispatched.md
+              printf -- '- `%s` (`%s`%s) — FAILED to dispatch\n' "$label" "$arch" "$suffix" >> .ci-tmp/dispatched.md
               failed=1
             fi
           done < .ci-tmp/dispatch.tsv

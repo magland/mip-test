@@ -291,7 +291,7 @@ def render_validation_comment(entries, errors):
     for e in entries:
         suffix = ", force" if e["force"] else ""
         lines.append(
-            f"- `{e['package_path']}` ({e['architecture']}{suffix})"
+            f"- `{e['name']}@{e['version']}` ({e['architecture']}{suffix})"
         )
     lines += [
         "",
@@ -310,7 +310,7 @@ def canonical_title(entries):
         return None
     e = entries[0]
     suffix = ", force" if e["force"] else ""
-    return f"Build: `{e['package_path']}` ({e['architecture']}{suffix})"
+    return f"Build: `{e['name']}@{e['version']}` ({e['architecture']}{suffix})"
 
 
 def cmd_validate(args):
